@@ -6,11 +6,13 @@ import cats.effect.IO
 import cats.instances.list._
 import cats.syntax.flatMap._
 import cats.syntax.traverse._
+import centaur.api.CentaurCromwellClient
 import centaur.reporting.{ErrorReporters, SuccessReporters, TestEnvironment}
 import centaur.test.CentaurTestException
 import centaur.test.standard.CentaurTestCase
 import centaur.test.submit.{SubmitResponse, SubmitWorkflowResponse}
 import centaur.test.workflow.WorkflowData
+import cromwell.core.WorkflowId
 import org.scalatest._
 import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -163,6 +165,14 @@ abstract class AbstractCentaurTestCaseSpec(cromwellBackends: List[String], cromw
     }
   }
 
+  private def clearCachedResults(workflowId: Option[String]): IO[Unit] = {
+    // Clear any cached results from this workflow and its subworkflows.
+    workflowId match {
+      case Some(id) => ??? // CentaurCromwellClient.clearCachedResults(WorkflowId.fromString(id))
+      case None => IO.pure(())
+    }
+  }
+
   /**
     * Returns an IO effect that will recursively try to run a test.
     *
@@ -178,7 +188,16 @@ abstract class AbstractCentaurTestCaseSpec(cromwellBackends: List[String], cromw
       for {
         _ <- ErrorReporters.logFailure(testEnvironment, centaurTestException)
         r <- if (attempt < retries) {
-          tryTryAgain(testName, runTest, retries, attempt + 1)
+          for {
+            // Clear any cached results that may have been generated from the previous failed run.
+            // This is desirable for both:
+            // * Preventing retries where jobs that succeeded by Cromwell's standards but failed by Centaur's
+            //   standards cache hit and continue to fail by Centaur's standards until retries are exhausted [BT-271]
+            // * Resetting call cache status to a blank slate to prevent call caching-sensitive tests from
+            //   seeing the cache results of halfway-successful prior attempts [CROM-6130]
+            _ <- clearCachedResults(centaurTestException.workflowIdOption)
+            s <- tryTryAgain(testName, runTest, retries, attempt + 1)
+          } yield s
         } else {
           IO.raiseError(centaurTestException)
         }
